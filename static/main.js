@@ -6,6 +6,9 @@ var _ = require('underscore');
 var colors = require('colors/safe');
 var Poet = require('../lib/poet.js');
 var mkdirp = require('mkdirp');
+var when = require('when');
+var request = require('request');
+var ncp = require('ncp').ncp;
 
 var StaticPoet = {
     init: function() {
@@ -31,20 +34,32 @@ var StaticPoet = {
             generateCategoryPages: true,
             generateTagPages: true,
             generateCategoryTagPages: false,
-            postsPerPage: 5,
-            metaFormat: 'json',
-            port: 3000
+            port: 3000,
+            requestBatchSize: 10,
+            poet: { // config to pass to poet
+                postsPerPage: 5,
+                metaFormat: 'json',
+                enableCategoryTagPages: true,
+                enableCategoryPagination: true,
+                enableTagsPagination: true,
+                enableCategoryTagsPagination: true
+            }
         }, config || {});
+        this.config.poet.posts = this.config.poet.posts || this.config.postsFolder;
 
         // attach commander
         this.attachInterface();
-        this.checkConfig();
     },
     checkConfig: function() {
+        if(this.configChecked) {
+            return !this.hasConfigError;
+        }
         this.hasConfigError = false;
+        this.configChecked = true;
         var errors = [];
         if(this.config.statePath) {
             this.config.statePath = path.resolve(this.siteDir, this.config.statePath);
+            this.config.poet.saveStatePath = this.config.statePath;
             if(!fs.existsSync(path.dirname(this.config.statePath))) {
                 errors.push('Invalid statepath provided. '+path.dirname(this.config.statePath)+' doesn\'t exist');
             }
@@ -97,7 +112,7 @@ var StaticPoet = {
         }
     },
     actionGenerate: function() {
-        if(this.hasConfigError) {
+        if(!this.checkConfig()) {
             return;
         }
         var me = this;
@@ -107,6 +122,7 @@ var StaticPoet = {
         app.set('views', this.config.viewsFolder);
         app.use(express.static(this.config.publicFolder));
         app.use(function(req, res, next) {
+            return next();
             var oldWrite = res.write,
             oldEnd = res.end;
 
@@ -136,90 +152,205 @@ var StaticPoet = {
 
             next();
         });
-        app.use(function(req, res, next) {
-            return next();
-            var send = res.send;
-            res.send = function() {
-                var args = Array.prototype.slice.call(arguments);
-                me.generateStaticVersion(req, res, function(err) {
-                    if(err) {
-                        send.apply(res, [err]);
-                    }
-                    else {
-                        send.apply(res, args);
-                    }
-                });
-            };
-            var render = res.render;
-            res.render = function() {
-                var args = Array.prototype.slice.call(arguments);
-                var cb = false;
-                var cbIndex;
-                args.forEach(function(arg, index) {
-                    if(_.isFunction(arg)) {
-                        cb = arg;
-                        cbIndex = index;
-                    }
-                });
-                var fn = function(err, str){
-                    if(err) {
-                        if(cb) {
-                            cb(err, str);
-                        }
-                        else {
-                            req.next(err);
-                        }
-                    }
-                    me.generateStaticVersion(req, res, function(err) {
-                        if(cb) {
-                            cb(err, str);
-                        }
-                        else {
-                            if(err) {
-                                req.next(err);
-                            }
-                            else {
-                                res.send(str);
-                            }
-                        }
-                    });
-                };
-                if(cb) {
-                    args[cbIndex] = fn;
-                }
-                else {
-                    args.push(fn);
-                }
-                render.apply(res, args);
-            };
-
-            next();
-        });
-
-        this.poet = require('../lib/poet')(app, {
-            postsPerPage: this.config.postsPerPage,
-            posts: this.config.postsFolder,
-            metaFormat: this.config.metaFormat
-        });
+        this.poet = require('../lib/poet')(app, this.config.poet);
 
         this.poet.init().then(function () {
             // initialized
+            me.generateAllPages(function(err) {
+                if(err) {
+                    console.log('Error', err);
+                }
+                else {
+                    console.log('Generated all pages');
+                }
+                me.copyStaticFiles(function(err) {
+                    if(err) {
+                        console.log('Error', err);
+                    }
+                    else {
+                        console.log('Copied public folder\'s content');
+                    }
+                    if(me.server) {
+                        me.server.close();
+                    }
+                });
+            });
         });
 
         app.get('/', function (req, res) { res.render('index'); });
-
-
-
-        app.listen(this.config.port);
+        this.server = app.listen(this.config.port);
     },
-    generateAllPages: function() {
+    expandPoet: function() {
 
     },
+    getContentStats: function() {
+        var stats = {
+            categories: {},
+            tags: {},
+            allPosts: 0
+        };
+        for(var slug in this.poet.posts) {
+            var post = this.poet.posts[slug];
+            var cats = post.category || [];
+            var tags = post.tags || [];
+            if(!_.isArray(cats)) {
+                cats = [cats];
+            }
+            if(!_.isArray(tags)) {
+                tags = [tags];
+            }
+            cats.forEach(function(cat) {
+                if(!stats.categories[cat]) {
+                    stats.categories[cat] = {
+                        count: 0,
+                        tags: {}
+                    };
+                }
+                stats.categories[cat].count++;
+                tags.forEach(function(tag) {
+                    if(!stats.categories[cat]['tags'][tag]) {
+                        stats.categories[cat]['tags'][tag] = {
+                            count: 0
+                        };
+                    }
+                    stats.categories[cat]['tags'][tag].count++;
+                });
+            });
+            tags.forEach(function(tag) {
+                if(!stats.tags[tag]) {
+                    stats.tags[tag] = {
+                        count: 0
+                    };
+                }
+                stats.tags[tag].count++;
+            });
+            stats.allPosts++;
+        }
+        this.contentStats = stats;
+    },
+    generateAllPages: function(cb) {
+        this.getContentStats();
+        var urls = [];
+        for(var slug in this.poet.posts) {
+            var post = this.poet.posts[slug];
+            urls.push(post.url);
+        }
+        var numPages = 0, i = 0;
+
+        for(var cat in this.contentStats.categories) {
+            var catCounts = this.contentStats.categories[cat];
+            if(this.config.poet.enableCategoryPagination) {
+                numPages = Math.ceil(catCounts.count / this.config.poet.postsPerPage);
+                for(i = 1; i<=numPages; i++) {
+                    urls.push(this.poet.helpers.categoryURL(cat, i));
+                }
+            }
+            else {
+                urls.push(this.poet.helpers.categoryURL(cat, 1));
+            }
+
+            if(this.config.poet.enableCategoryTagPages) {
+                for(var tag in catCounts.tags) {
+                    var tagCounts = catCounts.tags[tag];
+                    if(this.config.poet.enableCategoryTagsPagination) {
+                        numPages = Math.ceil(tagCounts.count / this.config.poet.postsPerPage);
+                        for(i = 1; i<=numPages; i++) {
+                            urls.push(this.poet.helpers.categoryTagURL(cat, tag, i));
+                        }
+                    }
+                    else {
+                        urls.push(this.poet.helpers.categoryTagURL(cat, tag, 1));
+                    }
+                }
+            }
+        }
+        for(var tag in this.contentStats.tags) {
+            var tagCounts = this.contentStats.tags[tag];
+            if(this.config.poet.enableTagsPagination) {
+                numPages = Math.ceil(tagCounts.count / this.config.poet.postsPerPage);
+                for(i = 1; i<=numPages; i++) {
+                    urls.push(this.poet.helpers.tagURL(tag, i));
+                }
+            }
+            else {
+                urls.push(this.poet.helpers.tagURL(tag, 1));
+            }
+        }
+        this.generateStaticVersionFromUrls(urls).then(function() {
+            cb();
+        }, function(err) {
+            cb(err);
+        });
+    },
+    splitArrayIntoSets: function(arr, max) {
+        var lists = _.groupBy(arr, function(element, index){
+            return Math.floor(index/max);
+        });
+        return _.toArray(lists);
+    },
+    generateStaticVersionFromUrls: function(urls) {
+        var me = this;
+        var urlSets = this.splitArrayIntoSets(urls, this.config.requestBatchSize);
+        var promises = urlSets.map(function(urlSet) {
+            return when.promise(function(resolve, reject) {
+                var pr = urlSet.map(function(url) {
+                    return me.generateStaticVersionFromUrl(url);
+                });
+                when.all(pr).then(resolve, reject);
+            });
+        });
+        return when.all(promises);
+    },
+    generateStaticVersionFromUrl: function(url) {
+        var me = this;
+        return when.promise(function(resolve, reject) {
+            url = decodeURI(url);
+            var outFile = path.join(me.config.outPath, url);
+            var ext = path.extname(outFile);
+            if(!ext) {
+                outFile = path.join(outFile, 'index.html');
+            }
+            var outFileParent = path.dirname(outFile);
+            mkdirp(outFileParent, function(err) {
+                fs.exists(outFileParent, function(exists) {
+                    if(!exists) {
+                        return reject(err);
+                    }
+                    request({
+                        url: 'http://localhost:'+me.config.port+url,
+                        method: 'GET',
+
+                    }, function(err, response, body) {
+                        body = body || '';
+                        if(!body) {
+                            console.log('Status code while downloading url '+url+': '+response.statusCode);
+                            return reject('cant download url');
+                        }
+                        fs.writeFile(outFile, body, function(err) {
+                            if(err) {
+                                reject(err);
+                            }
+                            else {
+                                resolve();
+                            }
+                        });
+                    });
+                });
+            });
+        });
+    },
+    copyStaticFiles: function(cb) {
+        console.log('COPY', this.config.publicFolder, this.config.outPath);
+        ncp(this.config.publicFolder, this.config.outPath, function(err) {
+            console.log(err);
+            cb(err);
+        });
+    },
+    /*
+     * We should just get body from http request when we send it.
+     */
     generateStaticVersion: function(relativeOutPath, body, next) {
-        /*if(res.staticVersionGenerated) {*/
-            //return next();
-        //}
-        /*res.staticVersionGenerated = true;*/
+
         var outFile = path.join(this.config.outPath, relativeOutPath);
         var ext = path.extname(outFile);
         if(!ext) {

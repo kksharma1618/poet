@@ -13,7 +13,9 @@
     "fs-then": "0.1.x",
     "commander": ">= 2.5.0",
     "colors": ">= 1.0.3",
-    "mkdirp": ">= 0.5.0"
+    "mkdirp": ">= 0.5.0",
+    "request": ">= 2.47.x",
+    "ncp": ">= 1.0.x"
   },
   "devDependencies": {
     "mocha": ">= 1.3.2",
