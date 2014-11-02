@@ -60,12 +60,16 @@ var StaticPoet = {
         if(this.config.statePath) {
             this.config.statePath = path.resolve(this.siteDir, this.config.statePath);
             this.config.poet.saveStatePath = this.config.statePath;
+            this.config.poet.regenerateFromFile = this.config.statePath;
             if(!fs.existsSync(path.dirname(this.config.statePath))) {
                 errors.push('Invalid statepath provided. '+path.dirname(this.config.statePath)+' doesn\'t exist');
             }
             else {
                 try {
-                    fs.writeFileSync(this.config.statePath, '');
+                    if(!fs.existsSync(this.config.statePath)) {
+                        fs.writeFileSync(this.config.statePath, '');
+                        fs.unlinkSync(this.config.statePath);
+                    }
                 }
                 catch(e) {
                     errors.push('statePath not writable: '+this.config.statePath);
@@ -121,40 +125,16 @@ var StaticPoet = {
         app.set('view engine', 'jade');
         app.set('views', this.config.viewsFolder);
         app.use(express.static(this.config.publicFolder));
-        app.use(function(req, res, next) {
-            return next();
-            var oldWrite = res.write,
-            oldEnd = res.end;
-
-            var chunks = [];
-
-            res.write = function (chunk) {
-                chunks.push(chunk);
-
-                var args = Array.prototype.slice.call(arguments);
-                oldWrite.apply(res, args);
-            };
-
-            res.end = function (chunk) {
-                if (chunk)
-                    chunks.push(chunk);
-
-                var args = Array.prototype.slice.call(arguments);
-                var body = Buffer.concat(chunks).toString('utf8');
-
-                me.generateStaticVersion(req.path, body, function(err) {
-                    if(err) {
-                        console.log(colors.red('Error generating :'+req.path));
-                    }
-                    oldEnd.apply(res, args);
-                });
-            };
-
-            next();
-        });
         this.poet = require('../lib/poet')(app, this.config.poet);
-
-        this.poet.init().then(function () {
+        var initMethod = 'init';
+        if(fs.existsSync(this.config.statePath)) {
+            initMethod = 'initRegenerate';
+        }
+        console.log('im', initMethod);
+        this.poet[initMethod]().then(function () {
+            if(initMethod == 'initRegenerate') {
+                return;
+            }
             // initialized
             me.generateAllPages(function(err) {
                 if(err) {
@@ -342,30 +322,8 @@ var StaticPoet = {
     copyStaticFiles: function(cb) {
         console.log('COPY', this.config.publicFolder, this.config.outPath);
         ncp(this.config.publicFolder, this.config.outPath, function(err) {
-            console.log(err);
+            console.log(err)
             cb(err);
-        });
-    },
-    /*
-     * We should just get body from http request when we send it.
-     */
-    generateStaticVersion: function(relativeOutPath, body, next) {
-
-        var outFile = path.join(this.config.outPath, relativeOutPath);
-        var ext = path.extname(outFile);
-        if(!ext) {
-            outFile = path.join(outFile, 'index.html');
-        }
-        var outFileParent = path.dirname(outFile);
-        mkdirp(outFileParent, function(err) {
-            fs.exists(outFileParent, function(exists) {
-                if(!exists) {
-                    return next(err);
-                }
-                fs.writeFile(outFile, body, function(err) {
-                    next(err);
-                });
-            });
         });
     }
 };
