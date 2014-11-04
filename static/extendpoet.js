@@ -18,13 +18,13 @@ exports.extendPoet = function(Poet) {
                     return when(me.init()).then(resolve, reject);
                 }
                 try {
-                    me.savedPostsMeta = JSON.parse(d);
+                    me.savedState = JSON.parse(d);
                 }
                 catch(e) {
                     console.log('Invalid json in state');
                     return when(me.init()).then(resolve, reject);
                 }
-                me.regenerate();
+                me.regenerate().then(resolve, reject);
             });
         });
         return promise;
@@ -59,14 +59,28 @@ exports.extendPoet = function(Poet) {
     };
 
     Poet.prototype.saveState = function(stateFilePath, cb) {
-        var s = {};
-        for(var slug in this.posts) {
-            var post = this.posts[slug];
-            s[post.filePath] = {
+        var s = {posts: {}, pages: {}}, slug, post;
+        for(slug in this.posts) {
+            if(!this.posts.hasOwnProperty(slug)) {
+                continue;
+            }
+            post = this.posts[slug];
+            s.posts[post.filePath] = {
                 date: post.date,
-                mtime: post.fileModifiedTime,
+                mtime: post.fileModifiedTime.getTime(),
                 categories: post.categories || [],
                 tags: post.tags || [],
+                slug: post.slug
+            };
+        }
+        for(slug in this.pages) {
+            if(!this.pages.hasOwnProperty(slug)) {
+                continue;
+            }
+            post = this.pages[slug];
+            s.pages[post.filePath] = {
+                date: post.date,
+                mtime: post.fileModifiedTime.getTime(),
                 slug: post.slug
             };
         }
@@ -77,34 +91,55 @@ exports.extendPoet = function(Poet) {
             cb(err);
         });
     };
-    var getPostFiles = function(poet, cb) {
-        var options = poet.options;
-
-        utils.getPostPaths(options.posts).then(function (files) {
-            files = files.filter(function(file) {
-                return !!utils.getTemplate(poet.templates, file);
+    var getChildrenFiles = function(poet, dir, filterByTemplate, cb) {
+        utils.getPostPaths(dir).then(function (files) {
+            var jfiles = {};
+            files.forEach(function(file) {
+                if(filterByTemplate && !utils.getTemplate(poet.templates, file)) {
+                    return;
+                }
+                jfiles[file] = utils.fileModifiedTimes[file];
             });
-            files = files.map(function(file) {
-                return {
-                    path: file,
-                    mtime: utils.fileModifiedTimes[file]
-                };
-            });
-            cb(files);
+            cb(jfiles);
         });
     };
+    var getFilesDifference = function(existingFiles, currentFiles) {
+        var deleted, added;
+        var updated = [];
+        var existingPaths = _.keys(existingFiles);
+        var currentPaths = _.keys(currentFiles);
+        deleted = _.difference(existingPaths, currentPaths);
+        added = _.difference(currentPaths, existingPaths);
+
+        for(var path in existingFiles) {
+            if(!currentFiles[path]) {
+                continue;
+            }
+            if(existingFiles[path].mtime != currentFiles[path].getTime()) {
+                updated.push(path);
+            }
+        }
+        return {
+            deleted: deleted,
+            updated: updated,
+            added: added
+        };
+    };
     Poet.prototype.regenerate = function() {
-        console.log('REG');
         var me = this;
         var options = this.options;
 
-        getPostFiles(this, function(files) {
-            console.log(files);
-            /*
-             * Find deleted, updated, added post files.
-             */
-        });
-
+        var promises = [];
+        if(this.options.regeneration.posts) {
+            promises.push(this.regeneratePosts());
+        }
+        if(this.options.regeneration.pages) {
+            promises.push(this.regeneratePages());
+        }
+        if(this.options.regeneration.statics) {
+            promises.push(this.regenerateStatics());
+        }
+        return when.all(promises);
         /*
          * Get mtime for statepath. it will give you last generation time.
          * Get all static files that were added, or modified after that.
@@ -112,5 +147,28 @@ exports.extendPoet = function(Poet) {
          * Delete all modified in out too.
          * Then use ncp in clobber mode so that it doesnt overwrite existing files.
          */
+    };
+    Poet.prototype.regeneratePosts = function() {
+        var me = this;
+        var promise = when.promise(function(resolve, reject) {
+            getChildrenFiles(me, me.options.posts, true, function(postFiles) {
+                var diff = getFilesDifference(me.savedState.posts || {}, postFiles);
+                console.log(diff);
+            });
+        });
+        return promise;
+    };
+    Poet.prototype.regeneratePages = function() {
+        return when([]);
+        getChildrenFiles(me, me.options.pages, true, function(pageFiles) {
+            console.log(postFiles, pageFiles);
+            /*
+             * Find deleted, updated, added post files.
+             */
+        });
+
+    };
+    Poet.prototype.regenerateStatics = function() {
+        return when([]);
     };
 };

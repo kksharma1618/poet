@@ -42,8 +42,13 @@ var StaticPoet = {
                 enableCategoryTagPages: true,
                 enableCategoryPagination: true,
                 enableTagsPagination: true,
-                enableCategoryTagsPagination: true
-            }
+                enableCategoryTagsPagination: true,
+                regeneration: { // so if you just want to regenerate posts and leave other untouch use -ac
+                    pages: true, // turn off using -a flag
+                    posts: true, // turn off using -b flag
+                    statics: true // turn off using -c flag
+                }
+            },
         }, config || {});
         this.config.poet.posts = this.config.poet.posts || this.config.postsFolder;
 
@@ -102,37 +107,66 @@ var StaticPoet = {
         var me = this;
         program
         .version(pkg.version)
-        .option('-f, --statepath [value]', 'This will override statePath config you set in poet configuration, if there. See README.md for details', program.statepath);
+        .option('-f, --statepath [value]', 'This will override statePath config you set in poet configuration, if there. See README.md for details', program.statepath)
+        .option('-n, --nosave', 'If provided then we wont save state.')
+        .option('-a, --regeneratepages', 'If provided then we wont regenerate pages.')
+        .option('-b, --regenerateposts', 'If provided then we wont regenerate posts.')
+        .option('-c, --regeneratestatics', 'If provided then we wont regenerate static files.');
 
         program.command('generate')
         .description('Generate your static website. If you provide statePath in config then it will save state for next regeneration in that file')
         .action(function() {
+            if(program.nosave) {
+                me.config.statePath = "";
+            }
             me.actionGenerate();
         });
+        program.command('regenerate')
+        .description('Regenerate your static website from previous state if available.')
+        .action(function() {
+            if(program.regeneratepages) {
+                me.config.poet.regeneration.pages = false;
+            }
+            if(program.regenerateposts) {
+                me.config.poet.regeneration.posts = false;
+            }
+            if(program.regeneratestatics) {
+                me.config.poet.regeneration.statics = false;
+            }
+            me.actionGenerate(true);
+        });
+
 
         program.parse(process.argv);
         if(program.statepath) {
             this.config.statePath = program.statepath;
         }
     },
-    actionGenerate: function() {
+    actionGenerate: function(regenerate) {
         if(!this.checkConfig()) {
             return;
         }
         var me = this;
         var express = require('express'), app = express();
+        var noSave = this.config.statePath == "";
 
         app.set('view engine', 'jade');
         app.set('views', this.config.viewsFolder);
         app.use(express.static(this.config.publicFolder));
         this.poet = require('../lib/poet')(app, this.config.poet);
         var initMethod = 'init';
-        if(fs.existsSync(this.config.statePath)) {
+        if(regenerate && fs.existsSync(this.config.statePath)) {
             initMethod = 'initRegenerate';
+            console.log('Generating from previous state');
         }
-        console.log('im', initMethod);
+        else {
+            console.log('Generating from scratch');
+        }
         this.poet[initMethod]().then(function () {
             if(initMethod == 'initRegenerate') {
+                return;
+            }
+            if(noSave) {
                 return;
             }
             // initialized
@@ -210,14 +244,25 @@ var StaticPoet = {
     },
     generateAllPages: function(cb) {
         this.getContentStats();
-        var urls = [];
-        for(var slug in this.poet.posts) {
-            var post = this.poet.posts[slug];
-            urls.push(post.url);
+        var urls = [], slug, tagCounts, tag;
+        for(slug in this.poet.posts) {
+            if(this.poet.posts.hasOwnProperty(slug)) {
+                var post = this.poet.posts[slug];
+                urls.push(post.url);
+            }
+        }
+        for(slug in this.poet.pages) {
+            if(this.poet.pages.hasOwnProperty(slug)) {
+                var page = this.poet.pages[slug];
+                urls.push(page.url);
+            }
         }
         var numPages = 0, i = 0;
 
         for(var cat in this.contentStats.categories) {
+            if(!this.contentStats.categories.hasOwnProperty(cat)) {
+                continue;
+            }
             var catCounts = this.contentStats.categories[cat];
             if(this.config.poet.enableCategoryPagination) {
                 numPages = Math.ceil(catCounts.count / this.config.poet.postsPerPage);
@@ -230,8 +275,11 @@ var StaticPoet = {
             }
 
             if(this.config.poet.enableCategoryTagPages) {
-                for(var tag in catCounts.tags) {
-                    var tagCounts = catCounts.tags[tag];
+                for(tag in catCounts.tags) {
+                    if(!catCounts.tags.hasOwnProperty(tag)) {
+                        continue;
+                    }
+                    tagCounts = catCounts.tags[tag];
                     if(this.config.poet.enableCategoryTagsPagination) {
                         numPages = Math.ceil(tagCounts.count / this.config.poet.postsPerPage);
                         for(i = 1; i<=numPages; i++) {
@@ -244,8 +292,11 @@ var StaticPoet = {
                 }
             }
         }
-        for(var tag in this.contentStats.tags) {
-            var tagCounts = this.contentStats.tags[tag];
+        for(tag in this.contentStats.tags) {
+            if(!this.contentStats.tags.hasOwnProperty(tag)) {
+                continue;
+            }
+            tagCounts = this.contentStats.tags[tag];
             if(this.config.poet.enableTagsPagination) {
                 numPages = Math.ceil(tagCounts.count / this.config.poet.postsPerPage);
                 for(i = 1; i<=numPages; i++) {
