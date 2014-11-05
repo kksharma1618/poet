@@ -1,3 +1,7 @@
+/*
+ * Status:
+ * -- static files regeneration not working (public folder). Updated files not detected.
+ */
 var program = require("commander");
 var pkg = require('../package.json');
 var path = require('path');
@@ -9,6 +13,7 @@ var mkdirp = require('mkdirp');
 var when = require('when');
 var request = require('request');
 var ncp = require('ncp').ncp;
+var utils = require('../lib/poet/utils');
 
 var StaticPoet = {
     init: function() {
@@ -29,6 +34,7 @@ var StaticPoet = {
             statePath: '.poetstate', // relative to siteDir if not absolute path
             outPath: 'out', // relative to siteDir if not absolute path
             postsFolder: path.join(this.siteDir, '_posts'),
+            pagesFolder: path.join(this.siteDir, '_pages'),
             viewsFolder: path.join(this.siteDir, 'views'),
             publicFolder: path.join(this.siteDir, 'public'),
             generateCategoryPages: true,
@@ -36,6 +42,9 @@ var StaticPoet = {
             generateCategoryTagPages: false,
             port: 3000,
             requestBatchSize: 10,
+            filterNonStaticFromPublic: function(file) { // all posts and pages have index.html in default configuration
+                return file.indexOf('/index.html') < 0;
+            },
             poet: { // config to pass to poet
                 postsPerPage: 5,
                 metaFormat: 'json',
@@ -52,6 +61,7 @@ var StaticPoet = {
             },
         }, config || {});
         this.config.poet.posts = this.config.poet.posts || this.config.postsFolder;
+        this.config.poet.pages = this.config.poet.pages || this.config.pagesFolder;
 
         // attach commander
         this.attachInterface();
@@ -143,6 +153,15 @@ var StaticPoet = {
             this.config.statePath = program.statepath;
         }
     },
+    isError: function(err) { // we can get err in this format: [ [ undefined, undefined, undefined, undefined, undefined ] ], which isnt really an error
+        if(_.isArray(err)) {
+            err = _.uniq(_.flatten(err))
+            if(err.length && _.isUndefined(err[0])) {
+                return false;
+            }
+        }
+        return !!err;
+    },
     actionGenerate: function(regenerate) {
         if(!this.checkConfig()) {
             return;
@@ -164,10 +183,35 @@ var StaticPoet = {
         else {
             console.log('Generating from scratch');
         }
-        this.poet.regenerationStats = {};
         this.poet[initMethod]().then(function () {
+            console.log('after '+initMethod);
             if(initMethod == 'initRegenerate') {
-                console.log('REG STATS', me.poet.regenerationStats);
+                console.log('REG STATS', JSON.stringify(me.poet.regenerationStats));
+
+                me.generateSpecificItems(me.poet.regenerationStats, function(err, urls) {
+                    if(me.isError(err)) {
+                        console.log('Error', err);
+                    }
+                    else {
+                        console.log('Regenerated these pages:'+urls.join("\n"));
+                    }
+                    me.syncStaticFiles(function(err, diff) {
+                        if(me.isError(err)) {
+                            console.log('Error', err);
+                        }
+                        else {
+                            console.log('Added these static files:'+diff.added.join("\n")+"\n");
+                            console.log('Updated these static files:'+diff.updated.join("\n")+"\n");
+                            console.log('Removed these static files:'+diff.deleted.join("\n")+"\n");
+
+                        }
+                        if(me.server) {
+                            me.server.close();
+                        }
+
+                    });
+                });
+
                 return;
             }
             if(noSave) {
@@ -175,14 +219,14 @@ var StaticPoet = {
             }
             // initialized
             me.generateAllPages(function(err) {
-                if(err) {
+                if(me.isError(err)) {
                     console.log('Error', err);
                 }
                 else {
                     console.log('Generated all pages');
                 }
                 me.copyStaticFiles(function(err) {
-                    if(err) {
+                    if(me.isError(err)) {
                         console.log('Error', err);
                     }
                     else {
@@ -197,6 +241,130 @@ var StaticPoet = {
 
         app.get('/', function (req, res) { res.render('index'); });
         this.server = app.listen(this.config.port);
+    },
+    getOutFilePath: function(url) {
+        var outFile = path.join(this.config.outPath, url);
+        var ext = path.extname(outFile);
+        if(!ext) {
+            outFile = path.join(outFile, 'index.html');
+        }
+        return outFile;
+    },
+
+    generateSpecificItems: function(diffs, cb) {
+        var me = this;
+        var postsDiff = diffs.posts.diff;
+        var pagesDiff = diffs.pages.diff;
+        var listingsDiff = diffs.listings.diff;
+        this.contentStats = this.poet.getContentStats();
+        var urls = [];
+        var regeneratePosts = postsDiff.updated.concat(postsDiff.added);
+        var regeneratePages = pagesDiff.updated.concat(pagesDiff.added);
+        var removedItems = postsDiff.deleted.concat(pagesDiff.deleted);
+
+        removedItems.forEach(function(item) {
+            item = item.replace(me.config.postsFolder, me.config.outPath).replace(me.config.pagesFolder, me.config.outPath);
+            fs.unlink(item, function(err) {
+                console.log(colors.red('Cannot delete '+item));
+            });
+        });
+        regeneratePosts.forEach(function(file) {
+            var post = me.poet.getPostFromFilePath(file);
+            urls.push(post.url);
+        });
+        regeneratePages.forEach(function(file) {
+            var page = me.poet.getPostFromFilePath(file, me.poet.pages);
+            urls.push(page.url);
+        });
+        var listings = listingsDiff.map(function(d) {
+            var s = '';
+            if(d.type == 'category') {
+                s += 'category::'+d.category;
+            }
+            if(d.type == 'tag') {
+                s += 'tag::'+d.tag;
+            }
+            if(d.type == 'categorytag') {
+                s += 'categorytag::'+d.category+'::'+d.tag;
+            }
+            if(d.page) {
+                s += '::'+d.page;
+            }
+            else {
+                s += '::all';
+            }
+            return s;
+        });
+        var numPages = 0, i = 0, k;
+
+        for(var cat in this.contentStats.categories) {
+            if(!this.contentStats.categories.hasOwnProperty(cat)) {
+                continue;
+            }
+            var catCounts = this.contentStats.categories[cat];
+            k = 'category::'+cat;
+            if(this.config.poet.enableCategoryPagination) {
+                numPages = Math.ceil(catCounts.count / this.config.poet.postsPerPage);
+                for(i = 1; i<=numPages; i++) {
+                    if(listings.indexOf(k+'::all') >= 0 || listings.indexOf(k+'::'+i) >= 0) {
+                        urls.push(this.poet.helpers.categoryURL(cat, i));
+                    }
+                }
+            }
+            else {
+
+                if(listings.indexOf(k+'::all') >= 0 || listings.indexOf(k+'::'+1) >= 0) {
+                    urls.push(this.poet.helpers.categoryURL(cat, 1));
+                }
+            }
+
+            if(this.config.poet.enableCategoryTagPages) {
+                for(tag in catCounts.tags) {
+                    if(!catCounts.tags.hasOwnProperty(tag)) {
+                        continue;
+                    }
+                    k = 'categorytag::'+cat+'::tag';
+                    tagCounts = catCounts.tags[tag];
+                    if(this.config.poet.enableCategoryTagsPagination) {
+                        numPages = Math.ceil(tagCounts.count / this.config.poet.postsPerPage);
+                        for(i = 1; i<=numPages; i++) {
+                            if(listings.indexOf(k+'::all') >= 0 || listings.indexOf(k+'::'+i) >= 0) {
+                                urls.push(this.poet.helpers.categoryTagURL(cat, tag, i));
+                            }
+                        }
+                    }
+                    else {
+                        if(listings.indexOf(k+'::all') >= 0 || listings.indexOf(k+'::'+1) >= 0) {
+                            urls.push(this.poet.helpers.categoryTagURL(cat, tag, 1));
+                        }
+                    }
+                }
+            }
+        }
+        for(tag in this.contentStats.tags) {
+            if(!this.contentStats.tags.hasOwnProperty(tag)) {
+                continue;
+            }
+            k = 'tag::'+tag;
+            tagCounts = this.contentStats.tags[tag];
+            if(this.config.poet.enableTagsPagination) {
+                numPages = Math.ceil(tagCounts.count / this.config.poet.postsPerPage);
+                for(i = 1; i<=numPages; i++) {
+                    if(listings.indexOf(k+'::all') >= 0 || listings.indexOf(k+'::'+i) >= 0) {
+                        urls.push(this.poet.helpers.tagURL(tag, i));
+                    }
+                }
+            }
+            else {
+                if(listings.indexOf(k+'::all') >= 0 || listings.indexOf(k+'::'+1) >= 0) {
+                    urls.push(this.poet.helpers.tagURL(tag, 1));
+                }
+            }
+        }
+        var cb2 = function(err) {
+            cb(err, urls);
+        };
+        this.generateStaticVersionFromUrls(urls).then(cb2, cb2);
     },
     generateAllPages: function(cb) {
         this.contentStats = this.poet.getContentStats();
@@ -290,11 +458,7 @@ var StaticPoet = {
         var me = this;
         return when.promise(function(resolve, reject) {
             url = decodeURI(url);
-            var outFile = path.join(me.config.outPath, url);
-            var ext = path.extname(outFile);
-            if(!ext) {
-                outFile = path.join(outFile, 'index.html');
-            }
+            var outFile = me.getOutFilePath(url);
             var outFileParent = path.dirname(outFile);
             mkdirp(outFileParent, function(err) {
                 fs.exists(outFileParent, function(exists) {
@@ -327,9 +491,77 @@ var StaticPoet = {
     copyStaticFiles: function(cb) {
         console.log('COPY', this.config.publicFolder, this.config.outPath);
         ncp(this.config.publicFolder, this.config.outPath, function(err) {
-            console.log(err)
             cb(err);
         });
+    },
+    syncStaticFiles: function(cb) {
+        var lastSyncTime = 0;
+        var me = this;
+        /*
+         * Get mtime for statepath. it will give you last generation time.
+         * Get all static files that were added, or modified after that.
+         * Get list of static files in public and out. Comapre to see which ones are deleted. Delete them in out.
+         * Delete all modified in out too.
+         * Then use ncp in non clobber mode so that it doesnt overwrite existing files.
+         */
+        fs.stat(this.config.statePath, function (err, stats) {
+
+            // store modified times. used later
+            if(stats.isFile() && stats.mtime) {
+                lastSyncTime = stats.mtime.getTime();
+            }
+            utils.fileModifiedTimes = {};
+            utils.getChildrenFiles(me.config.publicFolder).then(function(inFiles) {
+                var inFilesModifiedTimes = utils.fileModifiedTimes;
+                utils.fileModifiedTimes = {};
+                utils.getChildrenFiles(me.config.outPath).then(function(outFiles) {
+                    if(me.config.filterNonStaticFromPublic && _.isFunction(me.config.filterNonStaticFromPublic )) {
+                        outFiles = outFiles.filter(me.config.filterNonStaticFromPublic);
+                    }
+                    var diff = {};
+                    var rinFiles = inFiles.map(function(inFile) {
+                        return inFile.replace(me.config.publicFolder, '');
+                    });
+                    var routFiles = outFiles.map(function(outFile) {
+                        return outFile.replace(me.config.outPath, '');
+                    });
+                    diff.deleted =  _.difference(routFiles, rinFiles).map(function(file) {
+                        return path.join(me.config.outPath, file);
+                    });
+                    diff.added =   _.difference(rinFiles, routFiles).map(function(file) {
+                        return path.join(me.config.outPath, file);
+                    });
+
+                    // find all modified inFiles
+                    diff.updated = [];
+                    inFiles.forEach(function(inFile) {
+                        var mtime = 0;
+                        if(inFilesModifiedTimes[inFile]) {
+                            mtime = inFilesModifiedTimes[inFile].getTime();
+                        }
+                        if(mtime > lastSyncTime) {
+                            diff.updated.push(path.join(me.config.outPath, inFile.replace(me.config.publicFolder)));
+                        }
+                    });
+                    var deleteFiles = diff.updated.concat(diff.deleted);
+                    deleteFiles.forEach(function(file) {
+                        try{
+                            fs.unlinkSync(file);
+                        }
+                        catch(e) {
+
+                        }
+                    });
+
+                    // now copy all static files, but in non clobber mode
+                    ncp(me.config.publicFolder, me.config.outPath, {clobber: false}, function(err) {
+                        cb(err, diff);
+                    });
+                });
+            });
+
+        });
+
     }
 };
 StaticPoet.init();

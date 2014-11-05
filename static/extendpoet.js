@@ -63,7 +63,7 @@ exports.extendPoet = function(Poet) {
         }
         return oldInit.apply(this, args);
     };
-    Poet.protoype.loadState = function(state) {
+    Poet.prototype.loadState = function(state) {
         var path;
         for(path in state.posts) {
             var post = state.posts[path];
@@ -76,6 +76,7 @@ exports.extendPoet = function(Poet) {
             post.notYetLoaded = true;
             post.filePath = path;
             post.fileModifiedTime = new Date(post.mtime);
+            post.date = new Date(post.date);
             this.posts[post.slug] = post;
         }
         for(path in state.pages) {
@@ -85,8 +86,9 @@ exports.extendPoet = function(Poet) {
             }
             page.content = "";
             page.notYetLoaded = true;
-            post.filePath = path;
-            post.fileModifiedTime = new Date(post.mtime);
+            page.filePath = path;
+            page.fileModifiedTime = new Date(page.mtime);
+            page.date = new Date(page.date);
             page.url = encodeURI(utils.getRoute(this.options.routes, 'webpage').replace(':webpage', page.slug));
             this.pages[page.slug] = page;
         }
@@ -100,9 +102,9 @@ exports.extendPoet = function(Poet) {
             }
             post = this.posts[slug];
             s.posts[post.filePath] = {
-                date: post.date,
+                date: post.date.getTime(),
                 mtime: post.fileModifiedTime.getTime(),
-                categories: post.categories || [],
+                category: post.category || [],
                 tags: post.tags || [],
                 slug: post.slug,
                 preview_md5: md5(post.preview),
@@ -116,7 +118,7 @@ exports.extendPoet = function(Poet) {
             }
             post = this.pages[slug];
             s.pages[post.filePath] = {
-                date: post.date,
+                date: post.date.getTime(),
                 mtime: post.fileModifiedTime.getTime(),
                 slug: post.slug,
                 content_md5: md5(post.content),
@@ -181,8 +183,8 @@ exports.extendPoet = function(Poet) {
             allPages: 0
         };
         var slug;
-        var posts = this.getPosts();
-        var pages = this.getPages();
+        var posts = this.helpers.getPosts();
+        var pages = this.helpers.getPages();
         for(slug in posts) { // added paths array later, keeping count field for backwords compatibility and convenience
             if(!posts.hasOwnProperty(slug)) {
                 continue;
@@ -240,7 +242,7 @@ exports.extendPoet = function(Poet) {
     Poet.prototype.regenerate = function() {
         var me = this;
         var options = this.options;
-
+        this.regenerationStats = {};
         var promises = [];
         if(this.options.regeneration.posts) {
             promises.push(this.regeneratePosts());
@@ -249,17 +251,10 @@ exports.extendPoet = function(Poet) {
             promises.push(this.regeneratePages());
         }
         return when.all(promises).then(function() {
-            return me.getCategoryTagsDifferences();
+            me.getCategoryTagsDifferences();
         }, function(err) {
             console.log('Cannot regenerate posts and pages', err);
         });
-        /*
-         * Get mtime for statepath. it will give you last generation time.
-         * Get all static files that were added, or modified after that.
-         * Get list of static files in public and out. Comapre to see which ones are deleted. Delete them in out.
-         * Delete all modified in out too.
-         * Then use ncp in clobber mode so that it doesnt overwrite existing files.
-         */
     };
     Poet.prototype.getPostFromFilePath = function(filePath, posts) {
         posts = posts || this.posts;
@@ -337,6 +332,7 @@ exports.extendPoet = function(Poet) {
         var postDiffs = this.regenerationStats.posts.diff;
         var listingPostFields = this.options.regeneration.postFieldsUsedInListingHtml;
         var listings = [];
+        console.log('gctd', oldStats, newStats, postDiffs, listingPostFields);
 
         // which cat, tag, cat-tag to change?
         // change all listing whose post is added, deleted
@@ -352,21 +348,30 @@ exports.extendPoet = function(Poet) {
 
         postDiffs.updated.forEach(function(filePath) {
             var post = me.getPostFromFilePath(filePath);
-            var oldPost = me.savedState[filePath];
+            var oldPost = me.savedState.posts[filePath];
             var oldCategoryTags = [], categoryTags = [];
-            post.category.forEach(function(cat) {
+            var categories = post.category;
+            var oldCategories = oldPost.category;
+            if(!_.isArray(categories)) {
+                categories = [categories];
+            }
+
+            if(!_.isArray(oldCategories)) {
+                oldCategories = [oldCategories];
+            }
+            categories.forEach(function(cat) {
                 post.tags.forEach(function(tag) {
                     categoryTags.push(cat+'::::'+tag);
                 });
             });
-            oldPost.category.forEach(function(cat) {
+            oldCategories.forEach(function(cat) {
                 oldPost.tags.forEach(function(tag) {
                     oldCategoryTags.push(cat+'::::'+tag);
                 });
             });
 
-            var catsAdded = _.difference(post.category, oldPost.category);
-            var catsRemoved = _.difference(oldPost.category, post.category);
+            var catsAdded = _.difference(categories, oldCategories);
+            var catsRemoved = _.difference(oldCategories, categories);
             var tagsAdded = _.difference(post.tags, oldPost.tags);
             var tagsRemoved = _.difference(oldPost.tags, post.tags);
             var categoryTagsAdded = _.difference(categoryTags, oldCategoryTags);
@@ -453,12 +458,10 @@ exports.extendPoet = function(Poet) {
                 listings = listings.concat(me.findListingsWithPost(filePath, oldStats, true)); // all these listings (but not all paginated listings) needs to regenerated
             }
         });
+        console.log('LIST', listings);
         me.regenerationStats.listings = {
             diff: listings
         };
-
-        return when(1);
-
     };
     Poet.prototype.regeneratePosts = function() {
         var me = this;
@@ -467,12 +470,15 @@ exports.extendPoet = function(Poet) {
             getChildrenFiles(me, me.options.posts, true, function(postFiles) {
                 var promises = [];
                 var diff = getFilesDifference(me.savedState.posts || {}, postFiles);
+                console.log(diff);
                 // updated could be handled by first deleting them and then adding them
                 var deleted = diff.deleted.concat(diff.updated);
                 var added = diff.added.concat(diff.updated);
                 if(deleted.length) {
                     deleted.forEach(function(filePath) {
-                        post = postFiles[filePath];
+                        console.log(filePath);
+                        post = me.savedState.posts[filePath];
+                        console.log(post);
                         // delete out file
                         var outFile = getOutFilePath(me, post.url);
                         if(diff.updated.indexOf(filePath) < 0){ // delete, not updated
@@ -488,7 +494,7 @@ exports.extendPoet = function(Poet) {
                 if(added.length) {
                     promises.push(methods.createPostsOrPagesFromFiles(me, true, added));
                 }
-                me.generationStats.posts = {
+                me.regenerationStats.posts = {
                     diff: diff
                 };
 
@@ -504,6 +510,7 @@ exports.extendPoet = function(Poet) {
             getChildrenFiles(me, me.options.pages, true, function(postFiles) {
                 var promises = [];
                 var diff = getFilesDifference(me.savedState.pages || {}, postFiles);
+                console.log('pdiff', diff, me.savedState.pages, postFiles);
                 // updated could be handled by first deleting them and then adding them
                 var deleted = diff.deleted.concat(diff.updated);
                 var added = diff.added.concat(diff.updated);
@@ -525,7 +532,7 @@ exports.extendPoet = function(Poet) {
                 if(added.length) {
                     promises.push(methods.createPostsOrPagesFromFiles(me, false, added));
                 }
-                me.generationStats.pages = {
+                me.regenerationStats.pages = {
                     diff: diff
                 };
                 when.all(promises).then(resolve, reject);
