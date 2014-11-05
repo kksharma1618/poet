@@ -525,10 +525,10 @@ exports.extendPoet = function(Poet) {
                 if(added.length) {
                     promises.push(methods.createPostsOrPagesFromFiles(me, false, added));
                 }
-                when.all(promises).then(resolve, reject);
                 me.generationStats.pages = {
                     diff: diff
                 };
+                when.all(promises).then(resolve, reject);
             });
         });
         return promise;
