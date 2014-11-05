@@ -468,10 +468,10 @@ exports.extendPoet = function(Poet) {
                 var promises = [];
                 var diff = getFilesDifference(me.savedState.posts || {}, postFiles);
                 // updated could be handled by first deleting them and then adding them
-                diff.deleted = diff.deleted.concat(diff.updated);
-                diff.added = diff.added.concat(diff.updated);
-                if(diff.deleted.length) {
-                    diff.deleted.forEach(function(filePath) {
+                var deleted = diff.deleted.concat(diff.updated);
+                var added = diff.added.concat(diff.updated);
+                if(deleted.length) {
+                    deleted.forEach(function(filePath) {
                         post = postFiles[filePath];
                         // delete out file
                         var outFile = getOutFilePath(me, post.url);
@@ -485,8 +485,8 @@ exports.extendPoet = function(Poet) {
                         delete me.posts[post.slug];
                     });
                 }
-                if(diff.added.length) {
-                    promises.push(methods.createPostsOrPagesFromFiles(me, true, diff.added));
+                if(added.length) {
+                    promises.push(methods.createPostsOrPagesFromFiles(me, true, added));
                 }
                 me.generationStats.posts = {
                     diff: diff
