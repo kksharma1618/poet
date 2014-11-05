@@ -46,7 +46,8 @@ var StaticPoet = {
                 regeneration: { // so if you just want to regenerate posts and leave other untouch use -ac
                     pages: true, // turn off using -a flag
                     posts: true, // turn off using -b flag
-                    statics: true // turn off using -c flag
+                    statics: true, // turn off using -c flag
+                    postFieldsUsedInListingHtml: ["title", "category", "tag", "date", "preview", "url"] // just provide fields that you are using in listing generation. We will only regeneratee listing when one of these changes. Note: suppose you are not using category or tag field in listing html, but changing those can still regenerate added/removed category/tag listing pages. since we will need to add or remove this post in those listing pages.
                 }
             },
         }, config || {});
@@ -153,6 +154,7 @@ var StaticPoet = {
         app.set('view engine', 'jade');
         app.set('views', this.config.viewsFolder);
         app.use(express.static(this.config.publicFolder));
+        this.config.poet.outPath = this.config.outPath;
         this.poet = require('../lib/poet')(app, this.config.poet);
         var initMethod = 'init';
         if(regenerate && fs.existsSync(this.config.statePath)) {
@@ -162,8 +164,10 @@ var StaticPoet = {
         else {
             console.log('Generating from scratch');
         }
+        this.poet.regenerationStats = {};
         this.poet[initMethod]().then(function () {
             if(initMethod == 'initRegenerate') {
+                console.log('REG STATS', me.poet.regenerationStats);
                 return;
             }
             if(noSave) {
@@ -194,66 +198,20 @@ var StaticPoet = {
         app.get('/', function (req, res) { res.render('index'); });
         this.server = app.listen(this.config.port);
     },
-    expandPoet: function() {
-
-    },
-    getContentStats: function() {
-        var stats = {
-            categories: {},
-            tags: {},
-            allPosts: 0
-        };
-        for(var slug in this.poet.posts) {
-            var post = this.poet.posts[slug];
-            var cats = post.category || [];
-            var tags = post.tags || [];
-            if(!_.isArray(cats)) {
-                cats = [cats];
-            }
-            if(!_.isArray(tags)) {
-                tags = [tags];
-            }
-            cats.forEach(function(cat) {
-                if(!stats.categories[cat]) {
-                    stats.categories[cat] = {
-                        count: 0,
-                        tags: {}
-                    };
-                }
-                stats.categories[cat].count++;
-                tags.forEach(function(tag) {
-                    if(!stats.categories[cat]['tags'][tag]) {
-                        stats.categories[cat]['tags'][tag] = {
-                            count: 0
-                        };
-                    }
-                    stats.categories[cat]['tags'][tag].count++;
-                });
-            });
-            tags.forEach(function(tag) {
-                if(!stats.tags[tag]) {
-                    stats.tags[tag] = {
-                        count: 0
-                    };
-                }
-                stats.tags[tag].count++;
-            });
-            stats.allPosts++;
-        }
-        this.contentStats = stats;
-    },
     generateAllPages: function(cb) {
-        this.getContentStats();
+        this.contentStats = this.poet.getContentStats();
         var urls = [], slug, tagCounts, tag;
-        for(slug in this.poet.posts) {
-            if(this.poet.posts.hasOwnProperty(slug)) {
-                var post = this.poet.posts[slug];
+        var posts = this.poet.helpers.getPosts();
+        var pages = this.poet.helpers.getPages();
+        for(slug in posts) {
+            if(posts.hasOwnProperty(slug)) {
+                var post = posts[slug];
                 urls.push(post.url);
             }
         }
-        for(slug in this.poet.pages) {
-            if(this.poet.pages.hasOwnProperty(slug)) {
-                var page = this.poet.pages[slug];
+        for(slug in pages) {
+            if(pages.hasOwnProperty(slug)) {
+                var page = pages[slug];
                 urls.push(page.url);
             }
         }
@@ -307,11 +265,7 @@ var StaticPoet = {
                 urls.push(this.poet.helpers.tagURL(tag, 1));
             }
         }
-        this.generateStaticVersionFromUrls(urls).then(function() {
-            cb();
-        }, function(err) {
-            cb(err);
-        });
+        this.generateStaticVersionFromUrls(urls).then(cb, cb);
     },
     splitArrayIntoSets: function(arr, max) {
         var lists = _.groupBy(arr, function(element, index){
