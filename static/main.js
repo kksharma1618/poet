@@ -40,13 +40,20 @@ var StaticPoet = {
             generateCategoryPages: true,
             generateTagPages: true,
             generateCategoryTagPages: false,
-            port: 3000,
+            port: 3001,
             requestBatchSize: 10,
             filterNonStaticFromPublic: function(file) { // all posts and pages have index.html in default configuration
-                return file.indexOf('/index.html') < 0;
+                var allow = true;
+                if(file.indexOf('/index.html') >= 0) {
+                    allow = false;
+                }
+                if(path.basename(file).indexOf('.') === 0) { // file starting with .
+                    allow = false;
+                }
+                return allow;
             },
             poet: { // config to pass to poet
-                postsPerPage: 5,
+                postsPerPage: 2,
                 metaFormat: 'json',
                 enableCategoryTagPages: true,
                 enableCategoryPagination: true,
@@ -235,11 +242,10 @@ var StaticPoet = {
                     if(me.server) {
                         me.server.close();
                     }
-                });
+               });
             });
         });
 
-        app.get('/', function (req, res) { res.render('index'); });
         this.server = app.listen(this.config.port);
     },
     getOutFilePath: function(url) {
@@ -371,6 +377,7 @@ var StaticPoet = {
         var urls = [], slug, tagCounts, tag;
         var posts = this.poet.helpers.getPosts();
         var pages = this.poet.helpers.getPages();
+        urls.push('/');
         for(slug in posts) {
             if(posts.hasOwnProperty(slug)) {
                 var post = posts[slug];
@@ -384,6 +391,10 @@ var StaticPoet = {
             }
         }
         var numPages = 0, i = 0;
+        numPages = Math.ceil(posts.length / this.config.poet.postsPerPage);
+        for(i=2; i<=numPages; i++) {
+            urls.push('/page/'+i);
+        }
 
         for(var cat in this.contentStats.categories) {
             if(!this.contentStats.categories.hasOwnProperty(cat)) {
@@ -433,6 +444,7 @@ var StaticPoet = {
                 urls.push(this.poet.helpers.tagURL(tag, 1));
             }
         }
+        //console.log(urls);
         this.generateStaticVersionFromUrls(urls).then(cb, cb);
     },
     splitArrayIntoSets: function(arr, max) {
@@ -516,6 +528,7 @@ var StaticPoet = {
                 utils.fileModifiedTimes = {};
                 utils.getChildrenFiles(me.config.outPath).then(function(outFiles) {
                     if(me.config.filterNonStaticFromPublic && _.isFunction(me.config.filterNonStaticFromPublic )) {
+                        inFiles = inFiles.filter(me.config.filterNonStaticFromPublic);
                         outFiles = outFiles.filter(me.config.filterNonStaticFromPublic);
                     }
                     var diff = {};
@@ -540,7 +553,7 @@ var StaticPoet = {
                             mtime = inFilesModifiedTimes[inFile].getTime();
                         }
                         if(mtime > lastSyncTime) {
-                            diff.updated.push(path.join(me.config.outPath, inFile.replace(me.config.publicFolder)));
+                            diff.updated.push(path.join(me.config.outPath, inFile.replace(me.config.publicFolder, '')));
                         }
                     });
                     var deleteFiles = diff.updated.concat(diff.deleted);
